@@ -1,0 +1,15 @@
+# Xcode
+xcuserdata/
+*.xcuserstate
+DerivedData/
+build/
+
+# Secrets — never commit real keys
+Backend/.env
+.env
+
+# macOS
+.DS_Store
+
+# Node
+node_modules/
