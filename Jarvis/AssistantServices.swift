@@ -176,12 +176,14 @@ struct DirectOpenAIService: AssistantService {
 
     private func makeBody(_ request: AssistantRequest) -> [String: Any] {
         let instructions = [
-            "你是运行在 iPhone 上的专业视觉识别助手 JARVIS，通过手机后置摄像头看用户面前的实物。",
-            "先用一句话直接回答，再给最多三条真正有操作价值的要点。",
-            "只陈述当前画面和会话上下文支持的事实；看不清时明确说明，并建议靠近、补光或换角度。",
-            "需要最新价格、规格、型号参数、新闻或事实核查时使用联网搜索，并简要说明依据。",
-            "涉及医疗、电气、机械、化学品、交通或人身安全时，先提示停止危险操作并咨询专业人员。",
-            "默认用简洁自然的中文回答，避免冗长格式，方便手机语音朗读。",
+            "你是 JARVIS，运行在用户 iPhone 上的智能助手，能通过后置摄像头看到用户面前的画面。",
+            "像一个博学、可靠的专家一样回答：既利用画面里的视觉信息，也充分运用你自己的知识，给出准确、有用的答案。",
+            "识别物体时大胆给出最可能的判断，并简要说明把握程度；不要动不动就说“看不清”，只有确实无法判断时才请用户靠近、补光或换个角度。",
+            "根据问题自动决定回答的深度与方式：简单问题用一两句话直接回答；复杂、专业或需要推理的问题，先想清楚再给出有条理、准确的解释。",
+            "当问题涉及最新信息、价格、新闻、具体型号或规格、事实核查等需要查证的内容时，主动使用联网搜索工具，并说明关键依据。",
+            "如果画面和问题不匹配，或用户其实是在闲聊、问常识，就正常像聊天助手一样回答，不必强行描述画面。",
+            "用自然、口语化的中文回答（会被语音朗读），可长可短：简单就简短，需要时可以详细，但避免大段列表和符号堆砌。",
+            "涉及医疗、用药、电气、机械、化学品、交通或人身安全的操作，先提醒风险并建议咨询专业人士。",
         ].joined(separator: "\n")
 
         let context = request.conversationSummary.isEmpty
@@ -192,7 +194,7 @@ struct DirectOpenAIService: AssistantService {
             "model": model,
             "store": false,
             "stream": true,
-            "max_output_tokens": 1200,
+            "max_output_tokens": 2000,
             "instructions": instructions,
             "input": [
                 [
@@ -213,6 +215,183 @@ struct DirectOpenAIService: AssistantService {
         }
         return body
     }
+}
+
+// MARK: - Hybrid (OpenAI vision -> DeepSeek reasoning)
+
+/// OpenAI's API cannot be replaced by DeepSeek for a camera app because the
+/// DeepSeek API has no image input. This service bridges the two: OpenAI "sees"
+/// the frame and writes a description, then DeepSeek V4 answers from it.
+struct HybridVisionService: AssistantService {
+    let openAIKey: String
+    let visionModel: String
+    let deepseekKey: String
+    let deepseekModel: String
+
+    func streamAnswer(for request: AssistantRequest) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    // 1. OpenAI vision -> textual description of the frame.
+                    let dataURL = "data:image/jpeg;base64,\(request.imageData.base64EncodedString())"
+                    let visionMessages: [[String: Any]] = [
+                        ["role": "system", "content": "你是视觉分析模块。仔细观察图片并结合用户的问题，用中文客观、详细地描述画面中的相关信息：物体是什么、上面的品牌/型号/文字、颜色材质、状态、数字读数、周围环境等一切有助于回答的细节。只描述，不下最终结论、不给建议。"],
+                        ["role": "user", "content": [
+                            ["type": "text", "text": "用户的问题：\(request.question)"],
+                            ["type": "image_url", "image_url": ["url": dataURL]],
+                        ]],
+                    ]
+                    let description = try await chatCompletionOnce(
+                        baseURL: "https://api.openai.com/v1",
+                        apiKey: openAIKey, model: visionModel, messages: visionMessages)
+
+                    try Task.checkCancellation()
+
+                    // 2. DeepSeek reasons over the description + question.
+                    let messages = deepSeekMessages(
+                        question: request.question,
+                        summary: request.conversationSummary,
+                        description: description)
+                    try await streamChatCompletion(
+                        baseURL: "https://api.deepseek.com",
+                        apiKey: deepseekKey, model: deepseekModel,
+                        messages: messages, continuation: continuation)
+                    continuation.finish()
+                } catch is CancellationError {
+                    continuation.finish(throwing: CancellationError())
+                } catch let error as ServiceError {
+                    continuation.finish(throwing: error)
+                } catch let error as URLError {
+                    continuation.finish(throwing: ServiceError.network(error))
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+}
+
+/// DeepSeek text-only (used when no OpenAI key exists — no image understanding).
+struct DeepSeekTextService: AssistantService {
+    let apiKey: String
+    let model: String
+
+    func streamAnswer(for request: AssistantRequest) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    let messages = deepSeekMessages(
+                        question: request.question,
+                        summary: request.conversationSummary,
+                        description: nil)
+                    try await streamChatCompletion(
+                        baseURL: "https://api.deepseek.com",
+                        apiKey: apiKey, model: model,
+                        messages: messages, continuation: continuation)
+                    continuation.finish()
+                } catch is CancellationError {
+                    continuation.finish(throwing: CancellationError())
+                } catch let error as ServiceError {
+                    continuation.finish(throwing: error)
+                } catch let error as URLError {
+                    continuation.finish(throwing: ServiceError.network(error))
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+}
+
+private func deepSeekMessages(question: String, summary: String, description: String?) -> [[String: Any]] {
+    var system = [
+        "你是 JARVIS，用户的智能助手。",
+        "像博学可靠的专家一样回答：结合已知信息和你自己的知识，给出准确有用的答案。",
+        "根据问题自动决定深度：简单问题简答；复杂或需要推理的问题先想清楚再有条理地详答。",
+        "用自然口语化的中文回答（会被语音朗读），避免大段列表和符号堆砌。",
+        "涉及医疗、用药、电气、机械、化学品、交通或人身安全的操作，先提醒风险并建议咨询专业人士。",
+    ]
+    if description != nil {
+        system.insert("你看不到原始图片，下面的“画面描述”是视觉模块根据用户手机摄像头画面生成的，请据此回答；若描述与问题无关就当作普通提问。", at: 1)
+    }
+
+    var userText = ""
+    if let description, !description.isEmpty {
+        userText += "【画面描述】\n\(description)\n\n"
+    }
+    if !summary.isEmpty {
+        userText += "【最近的对话】\n\(summary)\n\n"
+    }
+    userText += "【我的问题】\n\(question)"
+
+    return [
+        ["role": "system", "content": system.joined(separator: "\n")],
+        ["role": "user", "content": userText],
+    ]
+}
+
+// MARK: - OpenAI-compatible chat/completions helpers (OpenAI + DeepSeek)
+
+private func chatCompletionOnce(baseURL: String, apiKey: String, model: String,
+                                messages: [[String: Any]]) async throws -> String {
+    var req = URLRequest(url: URL(string: baseURL + "/chat/completions")!)
+    req.httpMethod = "POST"
+    req.timeoutInterval = 60
+    req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+    req.httpBody = try JSONSerialization.data(withJSONObject: [
+        "model": model, "messages": messages, "stream": false,
+    ])
+    let (data, response) = try await URLSession.shared.data(for: req)
+    guard let http = response as? HTTPURLResponse else { throw ServiceError.invalidResponse }
+    guard (200..<300).contains(http.statusCode) else {
+        throw ServiceError.backend(status: http.statusCode, message: openAIErrorMessage(data))
+    }
+    struct Resp: Decodable {
+        struct Choice: Decodable { struct Msg: Decodable { let content: String? }; let message: Msg }
+        let choices: [Choice]
+    }
+    let decoded = try JSONDecoder().decode(Resp.self, from: data)
+    return decoded.choices.first?.message.content ?? ""
+}
+
+private func streamChatCompletion(baseURL: String, apiKey: String, model: String,
+                                  messages: [[String: Any]],
+                                  continuation: AsyncThrowingStream<String, Error>.Continuation) async throws {
+    var req = URLRequest(url: URL(string: baseURL + "/chat/completions")!)
+    req.httpMethod = "POST"
+    req.timeoutInterval = 120
+    req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+    req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+    req.httpBody = try JSONSerialization.data(withJSONObject: [
+        "model": model, "messages": messages, "stream": true,
+    ])
+    let (bytes, response) = try await URLSession.shared.bytes(for: req)
+    guard let http = response as? HTTPURLResponse else { throw ServiceError.invalidResponse }
+    guard (200..<300).contains(http.statusCode) else {
+        let data = try await collectErrorBody(from: bytes)
+        throw ServiceError.backend(status: http.statusCode, message: openAIErrorMessage(data))
+    }
+    struct Chunk: Decodable {
+        struct Choice: Decodable { struct Delta: Decodable { let content: String? }; let delta: Delta }
+        let choices: [Choice]
+    }
+    var received = false
+    for try await line in bytes.lines {
+        try Task.checkCancellation()
+        guard line.hasPrefix("data:") else { continue }
+        let raw = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+        guard raw != "[DONE]", let data = raw.data(using: .utf8) else { continue }
+        if let chunk = try? JSONDecoder().decode(Chunk.self, from: data),
+           let piece = chunk.choices.first?.delta.content, !piece.isEmpty {
+            received = true
+            continuation.yield(piece)
+        }
+    }
+    if !received { throw ServiceError.emptyResponse }
 }
 
 private func openAIErrorMessage(_ data: Data) -> String? {

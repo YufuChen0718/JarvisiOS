@@ -1,20 +1,32 @@
 import Foundation
 import Security
 
-/// Tiny Keychain wrapper for the OpenAI API key. Storing it in the Keychain
-/// (rather than the app bundle or a scheme env var) means it survives running
-/// the app standalone off the cable, is encrypted at rest, and can be changed
-/// without rebuilding.
+/// Keychain wrapper for provider API keys. Keys live only on-device, encrypted
+/// at rest, and survive standalone launches (no cable / no server needed).
 enum KeychainStore {
     private static let service = "com.jerry.jarvis"
-    private static let account = "openai-api-key"
 
-    static var apiKey: String? {
-        get { read() }
-        set { write(newValue) }
+    static var openAIKey: String? {
+        get { read("openai-api-key") }
+        set { write("openai-api-key", newValue) }
     }
 
-    private static func read() -> String? {
+    static var deepSeekKey: String? {
+        get { read("deepseek-api-key") }
+        set { write("deepseek-api-key", newValue) }
+    }
+
+    static var elevenLabsKey: String? {
+        get { read("elevenlabs-api-key") }
+        set { write("elevenlabs-api-key", newValue) }
+    }
+
+    static var dashScopeKey: String? {
+        get { read("dashscope-api-key") }
+        set { write("dashscope-api-key", newValue) }
+    }
+
+    private static func read(_ account: String) -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -32,7 +44,7 @@ enum KeychainStore {
         return string
     }
 
-    private static func write(_ value: String?) {
+    private static func write(_ account: String, _ value: String?) {
         let base: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,

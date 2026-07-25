@@ -12,6 +12,8 @@ struct AppConfiguration: Sendable {
     let bundledOpenAIKey: String?
     let openAIModel: String
     let webSearchEnabled: Bool
+    let bundledDeepSeekKey: String?
+    let deepSeekModel: String
 
     static let current: AppConfiguration = {
         let environment = ProcessInfo.processInfo.environment
@@ -34,21 +36,50 @@ struct AppConfiguration: Sendable {
             ?? (info["OpenAIWebSearch"] as? Bool).map(String.init)
             ?? "true"
 
+        let deepSeekKey = environment["DEEPSEEK_API_KEY"]?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
+            ?? (info["DeepSeekAPIKey"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
+        let deepSeekModelString = environment["DEEPSEEK_MODEL"]?.nonEmpty
+            ?? (info["DeepSeekModel"] as? String)?.nonEmpty
+            ?? "deepseek-v4-pro"
+
         return AppConfiguration(
             backendURL: validBackendURL(urlString),
             backendToken: token?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty,
             forcesDemoMode: !["false", "0", "no", "off"].contains(demoValue.lowercased()),
             bundledOpenAIKey: bundledKey,
             openAIModel: modelString,
-            webSearchEnabled: !["false", "0", "no", "off"].contains(webSearchValue.lowercased())
+            webSearchEnabled: !["false", "0", "no", "off"].contains(webSearchValue.lowercased()),
+            bundledDeepSeekKey: deepSeekKey,
+            deepSeekModel: deepSeekModelString
         )
     }()
+
+    var effectiveDeepSeekKey: String? {
+        KeychainStore.deepSeekKey ?? bundledDeepSeekKey
+    }
+
+    var effectiveDeepSeekModel: String {
+        UserDefaults.standard.string(forKey: "jarvis.deepseek-model")?
+            .trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty ?? deepSeekModel
+    }
+
+    /// OpenAI sees the frame, DeepSeek answers.
+    var usesHybrid: Bool {
+        effectiveOpenAIKey != nil && effectiveDeepSeekKey != nil
+    }
 
     /// The key actually used at runtime: an in-app (Keychain) key wins, then any
     /// build-time key. When non-nil, the app talks straight to OpenAI and needs
     /// no computer/server.
     var effectiveOpenAIKey: String? {
-        KeychainStore.apiKey ?? bundledOpenAIKey
+        KeychainStore.openAIKey ?? bundledOpenAIKey
+    }
+
+    /// Model actually used: an in-app override (UserDefaults) wins over the
+    /// build-time default, so the user can switch to a stronger model in-app.
+    var effectiveModel: String {
+        UserDefaults.standard.string(forKey: "jarvis.openai-model")?
+            .trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty ?? openAIModel
     }
 
     var usesDirectService: Bool {
@@ -60,7 +91,9 @@ struct AppConfiguration: Sendable {
     }
 
     var modeLabel: String {
-        if usesDirectService { return "直连模式" }
+        if usesHybrid { return "混合·看图+DeepSeek" }
+        if effectiveOpenAIKey != nil { return "直连·OpenAI" }
+        if effectiveDeepSeekKey != nil { return "DeepSeek·文字" }
         if forcesDemoMode { return "演示模式" }
         return backendURL == nil ? "未配置" : "局域网后端"
     }

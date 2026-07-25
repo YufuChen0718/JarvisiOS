@@ -42,10 +42,21 @@ final class AssistantSession {
     /// works anywhere with no computer; otherwise fall back to a LAN backend or
     /// the offline demo.
     private static func makeService(_ config: AppConfiguration) -> any AssistantService {
-        if let key = config.effectiveOpenAIKey {
-            return DirectOpenAIService(apiKey: key,
-                                       model: config.openAIModel,
+        let openAI = config.effectiveOpenAIKey
+        let deepSeek = config.effectiveDeepSeekKey
+        if let openAI, let deepSeek {
+            return HybridVisionService(openAIKey: openAI,
+                                       visionModel: config.effectiveModel,
+                                       deepseekKey: deepSeek,
+                                       deepseekModel: config.effectiveDeepSeekModel)
+        }
+        if let openAI {
+            return DirectOpenAIService(apiKey: openAI,
+                                       model: config.effectiveModel,
                                        enableWebSearch: config.webSearchEnabled)
+        }
+        if let deepSeek {
+            return DeepSeekTextService(apiKey: deepSeek, model: config.effectiveDeepSeekModel)
         }
         if config.usesDemoService {
             return DemoAssistantService()
@@ -53,14 +64,38 @@ final class AssistantSession {
         return BackendAssistantService(baseURL: config.backendURL!, token: config.backendToken)
     }
 
-    /// True when the app can answer on its own (direct OpenAI key present).
-    var isDirectMode: Bool { configuration.effectiveOpenAIKey != nil }
-    var apiKeyIsConfigured: Bool { configuration.effectiveOpenAIKey != nil }
+    /// Any provider configured (OpenAI and/or DeepSeek).
+    var apiKeyIsConfigured: Bool {
+        configuration.effectiveOpenAIKey != nil || configuration.effectiveDeepSeekKey != nil
+    }
+    var hasOpenAIKey: Bool { configuration.effectiveOpenAIKey != nil }
+    var hasDeepSeekKey: Bool { configuration.effectiveDeepSeekKey != nil }
+    var currentDeepSeekModel: String { configuration.effectiveDeepSeekModel }
 
-    /// Save (or clear) the in-app OpenAI key and rebuild the answering service.
-    func updateAPIKey(_ key: String?) {
-        let trimmed = key?.trimmingCharacters(in: .whitespacesAndNewlines)
-        KeychainStore.apiKey = (trimmed?.isEmpty == false) ? trimmed : nil
+    /// Current model in effect (for prefilling the settings field).
+    var currentModel: String { configuration.effectiveModel }
+
+    /// Save any provided provider settings (blank fields are left unchanged) and
+    /// rebuild the answering service. Auto-selects hybrid / OpenAI / DeepSeek.
+    func applySettings(openAIKey: String?, openAIModel: String?,
+                       deepSeekKey: String?, deepSeekModel: String?) {
+        func trimmed(_ v: String?) -> String? {
+            let t = v?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return (t?.isEmpty == false) ? t : nil
+        }
+        if let k = trimmed(openAIKey) { KeychainStore.openAIKey = k }
+        if let m = trimmed(openAIModel) { UserDefaults.standard.set(m, forKey: "jarvis.openai-model") }
+        if let k = trimmed(deepSeekKey) { KeychainStore.deepSeekKey = k }
+        if let m = trimmed(deepSeekModel) { UserDefaults.standard.set(m, forKey: "jarvis.deepseek-model") }
+        stopConversation()
+        service = Self.makeService(configuration)
+        errorMessage = nil
+    }
+
+    /// Remove all provider keys and fall back to demo/backend.
+    func clearAllKeys() {
+        KeychainStore.openAIKey = nil
+        KeychainStore.deepSeekKey = nil
         stopConversation()
         service = Self.makeService(configuration)
         errorMessage = nil
