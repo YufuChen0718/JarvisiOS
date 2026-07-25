@@ -21,8 +21,52 @@ Listen → detect end of speech → capture camera frame → analyze
 - Recent conversation context for natural follow-up questions
 - Typed-question and imported-image fallbacks for accessibility and Simulator testing
 - Safe offline demo mode that never uploads images
-- Server-side API key storage; the OpenAI key is never embedded in the app
+- Direct mode: enter an OpenAI key in-app (stored in Keychain) to talk straight to OpenAI with no server — works anywhere over cellular
+- Server-side API key storage option; with the LAN backend the OpenAI key is never embedded in the app
 - Request-size limits, in-memory rate limiting, privacy-preserving client hashes, and `store: false`
+
+## Direct mode: use anywhere, no computer
+
+By default the app talks to a Node backend on your Mac, which means the Mac must
+stay on and reachable. To use JARVIS anywhere over cellular with nothing else
+running, switch to **direct mode**: the app calls the OpenAI Responses API
+itself, and the key is stored in the device Keychain.
+
+Steps on the iPhone:
+
+1. Tap the **···** menu (top right) and choose **直连设置 (API Key)**.
+2. Paste an OpenAI API key (create one at platform.openai.com; the account must
+   have billing/credit).
+3. Tap **保存并启用直连**.
+
+The status pill then shows **直连模式**. From that point:
+
+- No computer, no Node backend, no LAN — the phone calls OpenAI directly.
+- Works anywhere on Wi‑Fi or cellular.
+- The key lives only in this device's Keychain: encrypted at rest, never written
+  into source, the Info.plist, or a scheme; changeable in-app without rebuilding.
+
+Service selection priority is automatic:
+
+1. **Direct** — a Keychain key (or a build-time `OPENAI_API_KEY` / Info.plist
+   `OpenAIAPIKey`) is present.
+2. **LAN backend** — `JarvisBackendURL` is set and no direct key exists.
+3. **Demo** — neither is configured.
+
+Direct-mode configuration keys (all optional; sensible defaults):
+
+| Source | Key | Default | Purpose |
+| --- | --- | --- | --- |
+| In-app | Keychain (via 直连设置) | — | Runtime OpenAI key; highest priority |
+| Env / Info.plist | `OPENAI_API_KEY` / `OpenAIAPIKey` | — | Build-time fallback key |
+| Env / Info.plist | `OPENAI_MODEL` / `OpenAIModel` | `gpt-4o` | Vision + web_search capable model |
+| Env / Info.plist | `OPENAI_WEB_SEARCH` / `OpenAIWebSearch` | `true` | Toggle the `web_search` tool |
+
+Trade-off: direct mode embeds the ability to spend on your OpenAI account into a
+build installed on your own device. It is intended for personal use. For a
+shared or distributed build, keep the key server-side and use the LAN/cloud
+backend instead. If the `web_search` tool is rejected by your account or model,
+set `OpenAIWebSearch` to `NO`; plain visual Q&A still works.
 
 ## Architecture
 
@@ -61,7 +105,7 @@ The repository ships in demo mode. This exercises the camera, speech, UI, and te
 
 1. Clone the repository and open `Jarvis.xcodeproj` in Xcode.
 2. Select the **Jarvis** target, open **Signing & Capabilities**, and choose your Apple development team.
-3. Replace `com.example.Jarvis` with a unique bundle identifier, for example `com.yourname.Jarvis`.
+3. The included bundle identifier belongs to the repository owner. Other developers must replace it with a unique identifier, for example `com.yourname.Jarvis`.
 4. Select a physical iPhone and press **Run**.
 5. Allow camera, microphone, speech recognition, and local-network access when prompted.
 6. Tap the microphone orb and speak. Pause briefly when finished; the turn submits automatically.
