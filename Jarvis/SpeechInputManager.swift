@@ -22,6 +22,7 @@ final class SpeechInputManager {
     private var onEndpoint: (@MainActor (String) -> Void)?
     private var onFailure: (@MainActor (Error) -> Void)?
     private var endpointWork: DispatchWorkItem?
+    private var noInputWork: DispatchWorkItem?
     private var didFireEndpoint = false
 
     /// How long the user must pause before we treat a sentence as finished.
@@ -60,6 +61,9 @@ final class SpeechInputManager {
                 guard let self else { return }
                 if let result {
                     self.transcript = result.bestTranscription.formattedString
+                    if !self.transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        self.noInputWork?.cancel() // heard something; stop the watchdog
+                    }
                     self.onPartial?(self.transcript)
                     self.scheduleEndpoint()
                 }
@@ -84,6 +88,7 @@ final class SpeechInputManager {
         do {
             try audioEngine.start()
             isListening = true
+            scheduleNoInputWatchdog()
             #if DEBUG
             print("[JARVIS][Speech] audio engine started")
             #endif
@@ -97,6 +102,8 @@ final class SpeechInputManager {
     func cancel() {
         endpointWork?.cancel()
         endpointWork = nil
+        noInputWork?.cancel()
+        noInputWork = nil
         stopAudioCapture()
         recognitionRequest?.endAudio()
         recognitionTask?.cancel()
@@ -128,7 +135,25 @@ final class SpeechInputManager {
         DispatchQueue.main.asyncAfter(deadline: .now() + silenceThreshold, execute: work)
     }
 
+    /// If we never hear a single word within a few seconds, the microphone is
+    /// almost certainly muted or permission-blocked — surface that instead of
+    /// silently sitting in "listening" forever.
+    private func scheduleNoInputWatchdog() {
+        noInputWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            Task { @MainActor in
+                guard let self, self.isListening, !self.didFireEndpoint,
+                      self.transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+                self.finishWithFailure(SpeechError.noSpeechHeard)
+            }
+        }
+        noInputWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8, execute: work)
+    }
+
     private func stopAudioCapture() {
+        noInputWork?.cancel()
+        noInputWork = nil
         if audioEngine.isRunning {
             audioEngine.stop()
         }
@@ -195,6 +220,7 @@ final class SpeechInputManager {
         case permissionDenied
         case unavailable
         case noAudioInput
+        case noSpeechHeard
         case audioSession(String)
         case recognitionFailed(String)
 
@@ -203,6 +229,7 @@ final class SpeechInputManager {
             case .permissionDenied: "请在系统设置中允许麦克风和语音识别，才能进行语音对话。"
             case .unavailable: "当前设备暂时无法使用语音识别，请稍后再试。"
             case .noAudioInput: "没有检测到可用的麦克风输入。请断开异常的蓝牙音频设备后重试。"
+            case .noSpeechHeard: "没听到声音。请到「设置 › JARVIS」确认已允许麦克风和语音识别，并确保手机没有静音麦克风，然后重试。"
             case .audioSession(let detail): "无法启动麦克风：\(detail)"
             case .recognitionFailed(let detail): "语音识别中断：\(detail)"
             }

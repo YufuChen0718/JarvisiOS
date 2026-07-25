@@ -17,7 +17,7 @@ final class AssistantSession {
     let speechOutput = SpeechOutputManager()
     let configuration: AppConfiguration
 
-    private let service: any AssistantService
+    private var service: any AssistantService
     private var responseTask: Task<Void, Never>?
 
     private(set) var phase: AssistantPhase = .idle
@@ -32,17 +32,38 @@ final class AssistantSession {
 
     init(configuration: AppConfiguration = .current) {
         self.configuration = configuration
-        if configuration.usesDemoService {
-            service = DemoAssistantService()
-        } else {
-            service = BackendAssistantService(
-                baseURL: configuration.backendURL!,
-                token: configuration.backendToken
-            )
-        }
+        self.service = Self.makeService(configuration)
         speechOutput.onFinish = { [weak self] in
             self?.resumeListeningIfActive()
         }
+    }
+
+    /// Pick the answer backend. Direct-to-OpenAI (Keychain key) wins so the app
+    /// works anywhere with no computer; otherwise fall back to a LAN backend or
+    /// the offline demo.
+    private static func makeService(_ config: AppConfiguration) -> any AssistantService {
+        if let key = config.effectiveOpenAIKey {
+            return DirectOpenAIService(apiKey: key,
+                                       model: config.openAIModel,
+                                       enableWebSearch: config.webSearchEnabled)
+        }
+        if config.usesDemoService {
+            return DemoAssistantService()
+        }
+        return BackendAssistantService(baseURL: config.backendURL!, token: config.backendToken)
+    }
+
+    /// True when the app can answer on its own (direct OpenAI key present).
+    var isDirectMode: Bool { configuration.effectiveOpenAIKey != nil }
+    var apiKeyIsConfigured: Bool { configuration.effectiveOpenAIKey != nil }
+
+    /// Save (or clear) the in-app OpenAI key and rebuild the answering service.
+    func updateAPIKey(_ key: String?) {
+        let trimmed = key?.trimmingCharacters(in: .whitespacesAndNewlines)
+        KeychainStore.apiKey = (trimmed?.isEmpty == false) ? trimmed : nil
+        stopConversation()
+        service = Self.makeService(configuration)
+        errorMessage = nil
     }
 
     // MARK: - Conversation control

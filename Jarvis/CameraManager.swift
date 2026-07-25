@@ -33,9 +33,14 @@ final class FrameGrabber: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate
             setDisplayImmediately(sampleBuffer)
             let buffer = sampleBuffer
             DispatchQueue.main.async {
-                if layer.status == .failed { layer.flush() }
-                if layer.isReadyForMoreMediaData {
-                    layer.enqueue(buffer)
+                // iOS 17+: the layer-level enqueue is deprecated and renders
+                // unreliably. Drive the modern sampleBufferRenderer instead.
+                let renderer = layer.sampleBufferRenderer
+                if renderer.requiresFlushToResumeDecoding {
+                    renderer.flush()
+                }
+                if renderer.isReadyForMoreMediaData {
+                    renderer.enqueue(buffer)
                 }
             }
         }

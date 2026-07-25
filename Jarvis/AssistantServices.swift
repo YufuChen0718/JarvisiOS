@@ -107,6 +107,122 @@ struct BackendAssistantService: AssistantService {
     }
 }
 
+/// Calls OpenAI directly from the device — no server required. The key lives in
+/// the Keychain, so the app works anywhere over cellular with no computer on.
+/// Trade-off: the key ships with the app on THIS device only (personal use).
+struct DirectOpenAIService: AssistantService {
+    let apiKey: String
+    let model: String
+    var enableWebSearch: Bool = true
+
+    func streamAnswer(for request: AssistantRequest) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    var urlRequest = URLRequest(url: URL(string: "https://api.openai.com/v1/responses")!)
+                    urlRequest.httpMethod = "POST"
+                    urlRequest.timeoutInterval = 120
+                    urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    urlRequest.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+                    urlRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+                    urlRequest.httpBody = try JSONSerialization.data(withJSONObject: makeBody(request))
+
+                    let (bytes, response) = try await URLSession.shared.bytes(for: urlRequest)
+                    guard let http = response as? HTTPURLResponse else {
+                        throw ServiceError.invalidResponse
+                    }
+                    guard (200..<300).contains(http.statusCode) else {
+                        let data = try await collectErrorBody(from: bytes)
+                        throw ServiceError.backend(status: http.statusCode, message: openAIErrorMessage(data))
+                    }
+
+                    var receivedOutput = false
+                    for try await line in bytes.lines {
+                        try Task.checkCancellation()
+                        guard line.hasPrefix("data:") else { continue }
+                        let raw = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+                        guard raw != "[DONE]", let data = raw.data(using: .utf8) else { continue }
+
+                        let event = try JSONDecoder().decode(StreamEvent.self, from: data)
+                        if event.type == "response.output_text.delta", let delta = event.delta {
+                            receivedOutput = true
+                            continuation.yield(delta)
+                        } else if event.type == "response.refusal.delta", let delta = event.delta {
+                            receivedOutput = true
+                            continuation.yield(delta)
+                        } else if event.type == "error" || event.type == "response.failed" {
+                            throw ServiceError.remote(
+                                event.error?.message
+                                    ?? event.response?.error?.message
+                                    ?? "OpenAI 返回未知错误。"
+                            )
+                        }
+                    }
+                    guard receivedOutput else { throw ServiceError.emptyResponse }
+                    continuation.finish()
+                } catch is CancellationError {
+                    continuation.finish(throwing: CancellationError())
+                } catch let error as ServiceError {
+                    continuation.finish(throwing: error)
+                } catch let error as URLError {
+                    continuation.finish(throwing: ServiceError.network(error))
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    private func makeBody(_ request: AssistantRequest) -> [String: Any] {
+        let instructions = [
+            "你是运行在 iPhone 上的专业视觉识别助手 JARVIS，通过手机后置摄像头看用户面前的实物。",
+            "先用一句话直接回答，再给最多三条真正有操作价值的要点。",
+            "只陈述当前画面和会话上下文支持的事实；看不清时明确说明，并建议靠近、补光或换角度。",
+            "需要最新价格、规格、型号参数、新闻或事实核查时使用联网搜索，并简要说明依据。",
+            "涉及医疗、电气、机械、化学品、交通或人身安全时，先提示停止危险操作并咨询专业人员。",
+            "默认用简洁自然的中文回答，避免冗长格式，方便手机语音朗读。",
+        ].joined(separator: "\n")
+
+        let context = request.conversationSummary.isEmpty
+            ? "当前问题：\(request.question)"
+            : "最近的对话（供指代消解）：\n\(request.conversationSummary)\n\n当前问题：\(request.question)"
+
+        var body: [String: Any] = [
+            "model": model,
+            "store": false,
+            "stream": true,
+            "max_output_tokens": 1200,
+            "instructions": instructions,
+            "input": [
+                [
+                    "role": "user",
+                    "content": [
+                        ["type": "input_text", "text": context],
+                        [
+                            "type": "input_image",
+                            "image_url": "data:image/jpeg;base64,\(request.imageData.base64EncodedString())",
+                            "detail": "high",
+                        ],
+                    ],
+                ],
+            ],
+        ]
+        if enableWebSearch {
+            body["tools"] = [["type": "web_search"]]
+        }
+        return body
+    }
+}
+
+private func openAIErrorMessage(_ data: Data) -> String? {
+    struct Payload: Decodable {
+        struct Err: Decodable { let message: String? }
+        let error: Err?
+    }
+    return (try? JSONDecoder().decode(Payload.self, from: data))?.error?.message
+}
+
 private struct BackendPayload: Encodable {
     let question: String
     let imageBase64: String

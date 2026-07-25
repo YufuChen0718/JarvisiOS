@@ -11,6 +11,8 @@ struct ConversationView: View {
     @State private var photoItem: PhotosPickerItem?
     @State private var showTypeField = false
     @State private var typedText = ""
+    @State private var showKeySheet = false
+    @State private var keyInput = ""
 
     var body: some View {
         ZStack {
@@ -83,6 +85,9 @@ struct ConversationView: View {
             Button("知道了", role: .cancel) { session.clearError() }
         } message: {
             Text(session.errorMessage ?? "")
+        }
+        .sheet(isPresented: $showKeySheet) {
+            apiKeySheet
         }
     }
 
@@ -197,6 +202,56 @@ struct ConversationView: View {
         }
     }
 
+    // MARK: - API key sheet (enables anywhere / no-computer use)
+
+    private var apiKeySheet: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    SecureField("sk-...", text: $keyInput)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .font(.system(.body, design: .monospaced))
+                } header: {
+                    Text("OpenAI API Key")
+                } footer: {
+                    Text(session.apiKeyIsConfigured
+                         ? "已配置直连。粘贴新 Key 可替换，留空并点“清除”可移除。填好后 App 直接连 OpenAI，出门走流量即可，无需电脑。"
+                         : "粘贴你的 OpenAI API Key。它只保存在本机 Keychain（加密、不进代码/不上传）。填好后 App 直接连 OpenAI，随时随地可用。")
+                }
+
+                Section {
+                    Button {
+                        session.updateAPIKey(keyInput)
+                        showKeySheet = false
+                    } label: {
+                        Label("保存并启用直连", systemImage: "checkmark.circle.fill")
+                    }
+                    .disabled(keyInput.trimmingCharacters(in: .whitespaces).isEmpty)
+
+                    if session.apiKeyIsConfigured {
+                        Button(role: .destructive) {
+                            session.updateAPIKey(nil)
+                            keyInput = ""
+                            showKeySheet = false
+                        } label: {
+                            Label("清除本机 Key", systemImage: "trash")
+                        }
+                    }
+                } footer: {
+                    Text("在 platform.openai.com 的 API keys 页面创建。需要一个已充值的 OpenAI 账户；按用量计费。")
+                }
+            }
+            .navigationTitle("直连设置")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("关闭") { showKeySheet = false }
+                }
+            }
+        }
+    }
+
     // MARK: - Top bar
 
     private var topBar: some View {
@@ -223,6 +278,12 @@ struct ConversationView: View {
                     showTypeField.toggle()
                 } label: {
                     Label("输入文字提问", systemImage: "keyboard")
+                }
+                Button {
+                    keyInput = ""
+                    showKeySheet = true
+                } label: {
+                    Label("直连设置（API Key）", systemImage: "key")
                 }
                 Button(role: .destructive) {
                     session.clearHistory()
